@@ -1,38 +1,77 @@
-import express, { Express, Request, Response, Router } from "express"
-import proxy from "express-http-proxy"
+
+import type * as http from 'http'
+import type * as server from 'http-proxy-middleware/dist/types'
+
+import express, { Request, Response } from "express"
+import dotenv from 'dotenv'
+
+import { createProxyMiddleware } from 'http-proxy-middleware'
+
 import parser from "body-parser"
 import cors from "cors"
+import fs from "fs"
 
 import RPC_REGISTRY from "./rpc-registry"
 
-const app: Express = express()
-const port = 777
+const app = express()
+const port = 1232
+
+dotenv.config()
 
 function selectRPC() {
-  return RPC_REGISTRY[0]
+  return RPC_REGISTRY[1]
 }
 
-app.use(cors())
-app.use("/", proxy(selectRPC, {
-  // https: true,
-  userResDecorator: (
-    proxyRes: Request,
-    proxyResData: Response
+async function handleResponse(
+    proxyRes: http.IncomingMessage,
+    req: Request,
+    res: Response
   ) => {
-    console.log(proxyResData.jsonp)
+    var body: any = []
+    proxyRes.on('data', (chunk) => body.push(chunk))
+    proxyRes.on('end', () => {
+       body = Buffer.concat(body).toString()
+       console.log("RESPONSE:", body)
+       res.end(body)
+    })
+}
 
-    return proxyRes
-  },
-  filter: (
-    userReq: Request,
-    userRes: Response
-  ) => {
+async function handleRequest(
+  proxyReq: http.ClientRequest,
+  req: Request,
+  res: Response
+) => {
+  if(req.body) {
+      let body = JSON.stringify(req.body)
 
-    return true;
+      proxyReq.setHeader('Content-type', 'application/json')
+      proxyReq.setHeader('Content-length', Buffer.byteLength(body))
+
+      proxyReq.write(body)
   }
-}))
-app.use(parser.urlencoded({ extended: false }))
-app.use(parser.json())
+}
+
+const proxyConfiguration: server.Options = {
+  ws: true,
+  toProxy: true,
+  changeOrigin: true,
+  target: selectRPC(),
+  ssl: {
+    key: fs.readFileSync(process.env.SSL_KEY, "ascii"),
+    cert: fs.readFileSync(process.env.SSL_CERT, "ascii")
+  },
+  preserveHeaderKeyCase: true,
+  onProxyRes:handleResponse,
+  onProxyReq: handleRequest
+}
+
+app.use("/", createProxyMiddleware(proxyConfiguration))
+
+app.use(express.urlencoded({ extended: true }))
+app.use(express.json())
+app.use(express.raw())
+
+app.post("/v1", createProxyMiddleware(proxyConfiguration))
 
 app.listen(port, () => {
   console.log(`[server]: Resolver is running at https://localhost:${port}`)
