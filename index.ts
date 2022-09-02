@@ -1,78 +1,107 @@
+import * as server from "http-proxy-middleware/dist/types"
+import type * as client from "express"
+import type * as http from "http"
 
-import type * as http from 'http'
-import type * as server from 'http-proxy-middleware/dist/types'
+import { ENDPOINT_REGISTRY, ADDRESSES, REGISTER_CALL } from "./constants/domains"
+import TORNADO_POOL from "./constants/tornado-pool.json"
 
-import express, { Request, Response } from "express"
-import dotenv from 'dotenv'
+import { createProxyMiddleware } from "http-proxy-middleware"
 
-import { createProxyMiddleware } from 'http-proxy-middleware'
-
-import parser from "body-parser"
+import * as ethers from "ethers"
+import express from "express"
+import dotenv from "dotenv"
 import cors from "cors"
 import fs from "fs"
 
-import RPC_REGISTRY from "./rpc-registry"
-
-const app = express()
-const port = 1232
+const SERVER = express()
+const PORT = 1232
 
 dotenv.config()
 
-function selectRPC() {
-  return RPC_REGISTRY[1]
+async function selectFunctionalEndpoint(): Promise<string> {
+  let selectedEndpoint = ENDPOINT_REGISTRY[0]
+  let isEndpointWorking = false
+  let endpointIndex = 0
+
+  while(isEndpointWorking != true) {
+    selectedEndpoint = ENDPOINT_REGISTRY[endpointIndex]
+    isEndpointWorking = await simulateCall(selectedEndpoint)
+
+    if(!isEndpointWorking) endpointIndex++
+  }
+
+  return selectedEndpoint
 }
 
-async function handleResponse(
+async function simulateCall(rpcEndpoint: string): Promise<boolean> {
+  const provider = new ethers.providers.JsonRpcProvider(rpcEndpoint)
+  const price = await provider.getGasPrice()
+  let transactionCall = true
+
+  try {
+    await provider.call({
+      from: ADDRESSES.depositor,
+      to: ADDRESSES.pool,
+      data: REGISTER_CALL,
+    }, "latest")
+  } catch(e) {
+    transactionCall = false
+  } finally {
+    return transactionCall
+  }
+}
+
+function handleRequest(
+  proxyReq: http.ClientRequest,
+  req: client.Request,
+  res: client.Response
+) {
+  if(req.body) {
+    let body = JSON.stringify(req.body)
+
+    proxyReq.setHeader("Content-type", "application/json")
+    proxyReq.setHeader("Content-length", Buffer.byteLength(body))
+
+    proxyReq.write(body)
+  }
+}
+
+function handleResponse(
     proxyRes: http.IncomingMessage,
-    req: Request,
-    res: Response
-  ) => {
+    req: client.Request,
+    res: client.Response
+  ) {
     var body: any = []
-    proxyRes.on('data', (chunk) => body.push(chunk))
-    proxyRes.on('end', () => {
+    proxyRes.on("data", (chunk) => body.push(chunk))
+    proxyRes.on("end", () => {
        body = Buffer.concat(body).toString()
        console.log("RESPONSE:", body)
        res.end(body)
     })
 }
 
-async function handleRequest(
-  proxyReq: http.ClientRequest,
-  req: Request,
-  res: Response
-) => {
-  if(req.body) {
-      let body = JSON.stringify(req.body)
-
-      proxyReq.setHeader('Content-type', 'application/json')
-      proxyReq.setHeader('Content-length', Buffer.byteLength(body))
-
-      proxyReq.write(body)
-  }
-}
-
 const proxyConfiguration: server.Options = {
-  ws: true,
-  toProxy: true,
-  changeOrigin: true,
-  target: selectRPC(),
+  target: ENDPOINT_REGISTRY[0],
   ssl: {
     key: fs.readFileSync(process.env.SSL_KEY, "ascii"),
     cert: fs.readFileSync(process.env.SSL_CERT, "ascii")
   },
-  preserveHeaderKeyCase: true,
-  onProxyRes:handleResponse,
-  onProxyReq: handleRequest
+  router: selectFunctionalEndpoint,
+  onProxyRes: handleResponse,
+  onProxyReq: handleRequest,
+  changeOrigin: true,
+  toProxy: true
+  // TODO: websocket support
+  // ws: true
 }
 
-app.use("/", createProxyMiddleware(proxyConfiguration))
+SERVER.use("/", createProxyMiddleware(proxyConfiguration))
 
-app.use(express.urlencoded({ extended: true }))
-app.use(express.json())
-app.use(express.raw())
+SERVER.use(express.urlencoded({ extended: true }))
+SERVER.use(express.json())
+SERVER.use(express.raw())
+SERVER.use(cors())
 
-app.post("/v1", createProxyMiddleware(proxyConfiguration))
+SERVER.post("/v1", createProxyMiddleware(proxyConfiguration))
 
-app.listen(port, () => {
-  console.log(`[server]: Resolver is running at https://localhost:${port}`)
-})
+SERVER.listen(PORT, () => console.log(`[server]: ${PORT}`))
