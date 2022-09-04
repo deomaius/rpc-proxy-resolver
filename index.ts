@@ -3,13 +3,12 @@ import type * as client from "express"
 import type * as http from "http"
 
 import { ENDPOINT_REGISTRY, ADDRESSES, REGISTER_CALL } from "./constants/domains"
-import TORNADO_POOL from "./constants/tornado-pool.json"
-
 import { createProxyMiddleware } from "http-proxy-middleware"
 
 import * as ethers from "ethers"
 import express from "express"
 import dotenv from "dotenv"
+import zlib from "zlib"
 import cors from "cors"
 import fs from "fs"
 
@@ -17,6 +16,29 @@ const SERVER = express()
 const PORT = 1232
 
 dotenv.config()
+
+function decodeMessage(
+  msg: http.IncomingMessage,
+  stream: Array<Buffer>,
+  encoding: string
+) {
+  return new Promise((resolve) => {
+    msg.on('data', (chunk) => stream.push(chunk))
+    msg.on("end", () => {
+      const raw = Buffer.concat(stream)
+
+      if(encoding == "br") {
+        zlib.brotliDecompress(raw,
+          (error, buffer) => {
+            if(buffer) resolve(buffer.toString())
+            else resolve(error)
+          })
+      } else {
+        resolve(raw.toString())
+      }
+    })
+  })
+}
 
 async function selectFunctionalEndpoint(): Promise<string> {
   let selectedEndpoint = ENDPOINT_REGISTRY[0]
@@ -66,18 +88,28 @@ function handleRequest(
   }
 }
 
-function handleResponse(
-    proxyRes: http.IncomingMessage,
-    req: client.Request,
-    res: client.Response
-  ) {
-    var body: any = []
-    proxyRes.on("data", (chunk) => body.push(chunk))
-    proxyRes.on("end", () => {
-       body = Buffer.concat(body).toString()
-       console.log("RESPONSE:", body)
-       res.end(body)
-    })
+async function handleResponse(
+  proxyRes: http.IncomingMessage,
+  req: client.Request,
+  res: client.Response
+) {
+  const resEncoding = proxyRes.headers["content-encoding"]
+  const resBuffer: Array<Buffer> = []
+  const resBody = await decodeMessage(
+    proxyRes,
+    resBuffer,
+    resEncoding || "application/json"
+  )
+
+  console.log('RESPONSE:', resBody)
+}
+
+function handleError(
+  err: Error,
+  req: client.Request,
+  res: client.Response
+) {
+  console.log('ERROR:', err)
 }
 
 const proxyConfiguration: server.Options = {
@@ -89,6 +121,7 @@ const proxyConfiguration: server.Options = {
   router: selectFunctionalEndpoint,
   onProxyRes: handleResponse,
   onProxyReq: handleRequest,
+  onError: handleError,
   changeOrigin: true,
   toProxy: true
   // TODO: websocket support
@@ -96,12 +129,9 @@ const proxyConfiguration: server.Options = {
 }
 
 SERVER.use("/", createProxyMiddleware(proxyConfiguration))
-
-SERVER.use(express.urlencoded({ extended: true }))
 SERVER.use(express.json())
+SERVER.use(express.urlencoded({ extended: true }))
 SERVER.use(express.raw())
 SERVER.use(cors())
-
-SERVER.post("/v1", createProxyMiddleware(proxyConfiguration))
 
 SERVER.listen(PORT, () => console.log(`[server]: ${PORT}`))
